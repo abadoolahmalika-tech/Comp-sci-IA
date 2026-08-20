@@ -37,7 +37,13 @@ def saveBooking(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
 
     if clashed:
         Pcheck_in_date = inputDate()
+        if Pcheck_in_date is None:
+            print("Booking cancelled")
+            return
         Pcheck_out_date = inputDate()
+        if Pcheck_out_date is None:
+            print("Booking cancelled")
+            return
         saveBooking(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee)
     else:
         cursor.execute(
@@ -48,24 +54,45 @@ def saveBooking(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
 
 
 def createBooking(pRate):
-    guest = input("Enter your guest's name: ")
+    guest = input("Enter your guest's name (0 to cancel): ")
+    if guest == "0":
+        print("Booking cancelled")
+        return
+
     check_in_date = inputDate()
+    if check_in_date is None:
+        print("Booking cancelled")
+        return
     check_out_date = inputDate()
-    while check_in_date > check_out_date or check_in_date < dt.date.today():  # CHANGED
+    if check_out_date is None:
+        print("Booking cancelled")
+        return
+    while check_in_date > check_out_date or check_in_date < dt.date.today():
         if check_in_date < dt.date.today():
             print("invalid date, check in cannot be before today")
         else:
             print("invalid date, check out must be after check in")
         check_in_date = inputDate()
+        if check_in_date is None:
+            print("Booking cancelled")
+            return
         check_out_date = inputDate()
+        if check_out_date is None:
+            print("Booking cancelled")
+            return
+
     total_fee = (check_out_date - check_in_date).days * pRate
     saveBooking(guest, check_in_date, check_out_date, total_fee)
     createInvoice(guest, check_in_date, check_out_date, total_fee)
 
+
 def inputDate():
     invalid = True
     while invalid:
-        day = int(input("Enter day"))
+        raw_day = input("Enter day (0 to cancel): ")
+        if raw_day == "0":
+            return None
+        day = int(raw_day)
         month = int(input("Enter month"))
         year = int(input("Enter year"))
         try:
@@ -74,6 +101,20 @@ def inputDate():
         except ValueError:
             print("Invalid date (Value error)")
     return date
+
+
+def inputRate():
+    invalid = True
+    while invalid:
+        raw = input("Enter rate (0 to cancel): ")
+        if raw == "0":
+            return None
+        try:
+            rate = int(raw)
+            invalid = False
+        except ValueError:
+            print("Invalid rate (Value error)")
+    return rate
 
 
 def sortBookings(sortingby, reverse=False):
@@ -148,9 +189,28 @@ def deleteBooking():
         except ValueError:
             print("Invalid (Value error)")
 
+
+def searchByName():
+    search = input("Enter name to search for: ")
+    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings")
+    rows = cursor.fetchall()
+    count = 1
+    for booking in rows:
+        if search.lower() in booking[1].lower():
+            checkIn = dt.date.fromisoformat(booking[2]).strftime("%d/%m/%Y")
+            checkOut = dt.date.fromisoformat(booking[3]).strftime("%d/%m/%Y")
+            print(str(count) + ")" + booking[1] + "," + checkIn + "," + checkOut + "," + "£" + str(booking[4]))
+            count += 1
+    if count == 1:
+        print("No bookings found for that name")
+
+
 def searchByDate():
     print("Enter the date to search for:")
     search_date = inputDate()
+    if search_date is None:
+        print("Search cancelled")
+        return
     cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings")
     rows = cursor.fetchall()
     count = 1
@@ -209,8 +269,11 @@ def main():
         choice = input("Choose an option: ")
 
         if choice == "1":
-            rate = int(input("Enter rate: "))
-            createBooking(rate)
+            rate = inputRate()
+            if rate is None:
+                print("Booking cancelled")
+            else:
+                createBooking(rate)
         elif choice == "2":
             showBookings()
         elif choice == "3":
