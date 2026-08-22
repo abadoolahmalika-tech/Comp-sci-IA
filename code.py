@@ -3,11 +3,24 @@ import sqlite3
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
+
+class Property:
+    def __init__(self, id, name):
+        self.id = id
+        self.name = name
+
 conn = sqlite3.connect("bookings.db")
 cursor = conn.cursor()
 cursor.execute("""
+    CREATE TABLE IF NOT EXISTS properties (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT
+    )
+""")
+cursor.execute("""
     CREATE TABLE IF NOT EXISTS bookings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        property_id INTEGER,
         guest TEXT,
         check_in TEXT,
         check_out TEXT,
@@ -17,9 +30,67 @@ cursor.execute("""
 conn.commit()
 
 
-def saveBooking(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
+def createProperty():
+    name = input("Enter property name: ")
+    cursor.execute("INSERT INTO properties (name) VALUES (?)", (name,))
+    conn.commit()
+    new_id = cursor.lastrowid
+    return Property(new_id, name)
+
+
+def chooseProperty():
+    cursor.execute("SELECT id, name FROM properties")
+    rows = cursor.fetchall()
+    if not rows:
+        print("No properties yet — let's create one.")
+        return createProperty()
+
+    count = 1
+    for row in rows:
+        print(str(count) + ") " + row[1])
+        count += 1
+    print(str(count) + ") Add a new property")
+
+    invalid = True
+    while invalid:
+        choice = input("Choose a property: ")
+        try:
+            choice = int(choice)
+            if 1 <= choice <= len(rows):
+                row = rows[choice - 1]
+                return Property(row[0], row[1])
+            elif choice == len(rows) + 1:
+                return createProperty()
+            else:
+                print("Invalid choice")
+        except ValueError:
+            print("Invalid (Value error)")
+
+    count = 1
+    for row in rows:
+        print(str(count) + ") " + row[1] + " (£" + str(row[2]) + "/night)")
+        count += 1
+    print(str(count) + ") Add a new property")
+
+    invalid = True
+    while invalid:
+        choice = input("Choose a property: ")
+        try:
+            choice = int(choice)
+            if 1 <= choice <= len(rows):
+                row = rows[choice - 1]
+                return Property(row[0], row[1], row[2])
+            elif choice == len(rows) + 1:
+                return createProperty()
+            else:
+                print("Invalid choice")
+        except ValueError:
+            print("Invalid (Value error)")
+
+
+def saveBooking(property, Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
     clashed = False
-    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings")
+    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ?", (property.id,))
     existing_bookings = cursor.fetchall()
 
     for booking in existing_bookings:
@@ -44,16 +115,21 @@ def saveBooking(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
         if Pcheck_out_date is None:
             print("Booking cancelled")
             return
-        saveBooking(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee)
+        saveBooking(property, Pguest, Pcheck_in_date, Pcheck_out_date, Pfee)
     else:
         cursor.execute(
-            "INSERT INTO bookings (guest, check_in, check_out, fee) VALUES (?, ?, ?, ?)",
-            (Pguest, Pcheck_in_date.isoformat(), Pcheck_out_date.isoformat(), Pfee)
+            "INSERT INTO bookings (property_id, guest, check_in, check_out, fee) VALUES (?, ?, ?, ?, ?)",
+            (property.id, Pguest, Pcheck_in_date.isoformat(), Pcheck_out_date.isoformat(), Pfee)
         )
         conn.commit()
 
 
-def createBooking(pRate):
+def createBooking(property):
+    rate = inputRate()
+    if rate is None:
+        print("Booking cancelled")
+        return
+
     guest = input("Enter your guest's name (0 to cancel): ")
     if guest == "0":
         print("Booking cancelled")
@@ -81,10 +157,9 @@ def createBooking(pRate):
             print("Booking cancelled")
             return
 
-    total_fee = (check_out_date - check_in_date).days * pRate
-    saveBooking(guest, check_in_date, check_out_date, total_fee)
-    createInvoice(guest, check_in_date, check_out_date, total_fee)
-
+    total_fee = (check_out_date - check_in_date).days * rate
+    saveBooking(property, guest, check_in_date, check_out_date, total_fee)
+    createInvoice(property, guest, check_in_date, check_out_date, total_fee)
 
 def inputDate():
     invalid = True
@@ -117,15 +192,18 @@ def inputRate():
     return rate
 
 
-def sortBookings(sortingby, reverse=False):
+def sortBookings(property, sortingby, reverse=False):
     columns = {0: "id", 1: "check_in", 2: "check_out"}
     column = columns[sortingby]
     order = "DESC" if reverse else "ASC"
-    cursor.execute(f"SELECT id, guest, check_in, check_out, fee FROM bookings ORDER BY {column} {order}")
+    cursor.execute(
+        f"SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ? ORDER BY {column} {order}",
+        (property.id,)
+    )
     return cursor.fetchall()
 
 
-def showBookings(ask_sort=True):
+def showBookings(property, ask_sort=True):
     if ask_sort:
         invalid = True
         while invalid:
@@ -144,9 +222,12 @@ def showBookings(ask_sort=True):
             direction = input("Enter 1 for earliest first, 2 for latest first: ")
             reverse = (direction == "2")
 
-        display_list = sortBookings(sortby, reverse)
+        display_list = sortBookings(property, sortby, reverse)
     else:
-        cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings ORDER BY id")
+        cursor.execute(
+            "SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ? ORDER BY id",
+            (property.id,)
+        )
         display_list = cursor.fetchall()
 
     count = 1
@@ -157,8 +238,11 @@ def showBookings(ask_sort=True):
         count += 1
 
 
-def deleteBooking():
-    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings ORDER BY id")
+def deleteBooking(property):
+    cursor.execute(
+        "SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ? ORDER BY id",
+        (property.id,)
+    )
     rows = cursor.fetchall()
     count = 1
     for booking in rows:
@@ -190,9 +274,9 @@ def deleteBooking():
             print("Invalid (Value error)")
 
 
-def searchByName():
+def searchByName(property):
     search = input("Enter name to search for: ")
-    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings")
+    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ?", (property.id,))
     rows = cursor.fetchall()
     count = 1
     for booking in rows:
@@ -205,13 +289,13 @@ def searchByName():
         print("No bookings found for that name")
 
 
-def searchByDate():
+def searchByDate(property):
     print("Enter the date to search for:")
     search_date = inputDate()
     if search_date is None:
         print("Search cancelled")
         return
-    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings")
+    cursor.execute("SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ?", (property.id,))
     rows = cursor.fetchall()
     count = 1
     for booking in rows:
@@ -226,7 +310,7 @@ def searchByDate():
         print("No bookings found for that date")
 
 
-def createInvoice(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
+def createInvoice(property, Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
     Pcheck_in_date = Pcheck_in_date.strftime("%d/%m/%Y")
     Pcheck_out_date = Pcheck_out_date.strftime("%d/%m/%Y")
     Pfee = str(Pfee)
@@ -244,6 +328,8 @@ def createInvoice(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
     y = height - 130
     line_gap = 25
 
+    c.drawString(50, y, "Property: " + property.name)
+    y -= line_gap
     c.drawString(50, y, "Guest: " + Pguest)
     y -= line_gap
     c.drawString(50, y, "Check-in: " + Pcheck_in_date)
@@ -261,31 +347,37 @@ def createInvoice(Pguest, Pcheck_in_date, Pcheck_out_date, Pfee):
 
 
 def main():
+    property = chooseProperty()
+    if property is None:
+        return
+
     while True:
+        print("--- " + property.name + " ---")
         print("1. Create Booking")
         print("2. See bookings")
         print("3. Remove booking")
         print("4. Search bookings")
+        print("5. Switch property")
         choice = input("Choose an option: ")
 
         if choice == "1":
-            rate = inputRate()
-            if rate is None:
-                print("Booking cancelled")
-            else:
-                createBooking(rate)
+            createBooking(property)
         elif choice == "2":
-            showBookings()
+            showBookings(property)
         elif choice == "3":
-            deleteBooking()
+            deleteBooking(property)
         elif choice == "4":
             searchFunction = input("for search by name enter 1, for search by date enter 2: ")
             if searchFunction == "1":
-                searchByName()
+                searchByName(property)
             elif searchFunction == "2":
-                searchByDate()
+                searchByDate(property)
             else:
                 print("Invalid option")
+        elif choice == "5":
+            property = chooseProperty()
+            if property is None:
+                return
         else:
             print("Invalid choice, try again")
 
