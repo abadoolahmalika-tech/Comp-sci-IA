@@ -1,13 +1,14 @@
 import datetime as dt
 import sqlite3
 import tkinter as tk
+from tkinter import ttk
 from tkinter import messagebox
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 
+# a property just needs an id (from the database) and a name
 class Property:
-    # a property just needs an id (from the database) and a name
     def __init__(self, id, name):
         self.id = id
         self.name = name
@@ -21,7 +22,6 @@ class Property:
         )
         existing_bookings = cursor.fetchall()
 
-        # check the new dates against every existing booking for this property
         for booking in existing_bookings:
             booking_check_in = dt.date.fromisoformat(booking[2])
             booking_check_out = dt.date.fromisoformat(booking[3])
@@ -40,14 +40,10 @@ class Property:
         conn.commit()
         return True, "booking saved"
 
-    # grabs all bookings for this property, sorted however you want
-    # sortingby: 0 = booking id (order added), 1 = check-in date, 2 = check-out date
-    def sortBookings(self, sortingby, reverse=False):
-        columns = {0: "id", 1: "check_in", 2: "check_out"}
-        column = columns[sortingby]
-        order = "DESC" if reverse else "ASC"
+    # grabs every booking for this property, in the order they were added
+    def getBookings(self):
         cursor.execute(
-            f"SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ? ORDER BY {column} {order}",
+            "SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ? ORDER BY id",
             (self.id,)
         )
         return cursor.fetchall()
@@ -68,27 +64,8 @@ class Property:
 
     # case-insensitive "contains" search on guest name, e.g. "ali" matches "Alice"
     def searchByName(self, search):
-        cursor.execute(
-            "SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ?",
-            (self.id,)
-        )
-        rows = cursor.fetchall()
+        rows = self.getBookings()
         return [b for b in rows if search.lower() in b[1].lower()]
-
-    # finds bookings where the given date falls somewhere between check-in and check-out
-    def searchByDate(self, search_date):
-        cursor.execute(
-            "SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ?",
-            (self.id,)
-        )
-        rows = cursor.fetchall()
-        matches = []
-        for booking in rows:
-            booking_check_in = dt.date.fromisoformat(booking[2])
-            booking_check_out = dt.date.fromisoformat(booking[3])
-            if booking_check_in <= search_date <= booking_check_out:
-                matches.append(booking)
-        return matches
 
     # spits out a simple pdf invoice for a booking using reportlab
     def createInvoice(self, guest, check_in_date, check_out_date, fee):
@@ -109,7 +86,6 @@ class Property:
         y = height - 130
         line_gap = 25
 
-        # just stepping y down a fixed gap after each line so everything's evenly spaced
         c.drawString(50, y, "Property: " + self.name)
         y -= line_gap
         c.drawString(50, y, "Guest: " + guest)
@@ -132,7 +108,6 @@ class Property:
 conn = sqlite3.connect("bookings.db")
 cursor = conn.cursor()
 
-# "if not exists" means this only actually creates the tables the very first time the program runs
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS properties (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,139 +126,202 @@ cursor.execute("""
 """)
 conn.commit()
 
-# keeps track of whichever property is currently selected
 current_property = None
 
 root = tk.Tk()
 root.title("Booking System")
-root.geometry("550x550")
+root.geometry("520x480")
 
 
-# wipes every widget off the window so the next screen can be drawn fresh
-# this is basically how "switching screens" works in tkinter, since there's no built-in concept of pages
 def clearScreen():
-    for widget in root.winfo_children():
+    widget_list = root.winfo_children()
+    for widget in widget_list:
         widget.destroy()
 
 
-# turns one booking row from the database into a readable line of text
-def formatRow(booking):
-    booking_id, guest, check_in, check_out, fee = booking
-    check_in_str = dt.date.fromisoformat(check_in).strftime("%d/%m/%Y")
-    check_out_str = dt.date.fromisoformat(check_out).strftime("%d/%m/%Y")
-    return guest + "  |  " + check_in_str + " - " + check_out_str + "  |  £" + str(fee)
-
-
-# ---------- property selection screen ----------
-# first thing you see when the app opens, or when you switch properties
+# ============================================================
+# SCREEN 1: choose a property
+# ============================================================
 
 def showPropertyScreen():
     clearScreen()
     global current_property
     current_property = None
 
-    tk.Label(root, text="Select a property", font=("Helvetica", 16)).pack(pady=10)
+    title = tk.Label(root, text="Select a property", font=("Helvetica", 16))
+    title.pack(pady=10)
+
+    property_listbox = tk.Listbox(root, width=40)
+    property_listbox.pack(pady=10)
 
     cursor.execute("SELECT id, name FROM properties")
-    rows = cursor.fetchall()
+    property_rows = cursor.fetchall()
+    for row in property_rows:
+        property_listbox.insert(tk.END, row[1])
 
-    # one button per property, however many there are
-    # the pid=prop_id, pname=name bit locks in the value for each button at creation time,
-    # otherwise every button would end up using whatever the last property in the loop was
-    for row in rows:
-        prop_id, name = row
-        tk.Button(
-            root, text=name, width=30,
-            command=lambda pid=prop_id, pname=name: selectProperty(pid, pname)
-        ).pack(pady=3)
+    def onSelectClicked():
+        selected_index = property_listbox.curselection()
+        if not selected_index:
+            messagebox.showerror("Error", "Click a property first")
+            return
+        index = selected_index[0]
+        chosen_row = property_rows[index]
+        global current_property
+        current_property = Property(chosen_row[0], chosen_row[1])
+        showBookingsScreen()
 
-    tk.Label(root, text="Add a new property:").pack(pady=(20, 0))
+    select_button = tk.Button(root, text="Select Property", command=onSelectClicked)
+    select_button.pack(pady=5)
+
+    add_label = tk.Label(root, text="Or add a new property:")
+    add_label.pack(pady=(20, 0))
+
     name_entry = tk.Entry(root)
     name_entry.pack()
 
-    def addProperty():
+    def onAddClicked():
         name = name_entry.get()
         if name == "":
             messagebox.showerror("Error", "Enter a property name")
             return
         cursor.execute("INSERT INTO properties (name) VALUES (?)", (name,))
         conn.commit()
-        showPropertyScreen()  # refresh so the new property shows up in the list
+        showPropertyScreen()
 
-    tk.Button(root, text="Add Property", command=addProperty).pack(pady=5)
-
-
-def selectProperty(prop_id, name):
-    global current_property
-    current_property = Property(prop_id, name)
-    showMainMenu()
+    add_button = tk.Button(root, text="Add Property", command=onAddClicked)
+    add_button.pack(pady=5)
 
 
-# ---------- main menu screen ----------
-# shows once a property's picked, has buttons for everything else
+# ============================================================
+# SCREEN 2: the main "Bookings" table screen, matching the sketch
+# this stays as the main window - Add Booking opens a SEPARATE popup window on top of it
+# ============================================================
 
-def showMainMenu():
+def showBookingsScreen():
     clearScreen()
-    tk.Label(root, text=current_property.name, font=("Helvetica", 16)).pack(pady=10)
+    root.title("Bookings - " + current_property.name)
 
-    tk.Button(root, text="Create Booking", width=25, command=showCreateBookingScreen).pack(pady=5)
-    tk.Button(root, text="View Bookings", width=25, command=lambda: showViewBookingsScreen()).pack(pady=5)
-    tk.Button(root, text="Search by Name", width=25, command=showSearchByNameScreen).pack(pady=5)
-    tk.Button(root, text="Search by Date", width=25, command=showSearchByDateScreen).pack(pady=5)
-    tk.Button(root, text="Switch Property", width=25, command=showPropertyScreen).pack(pady=(20, 5))
+    # ---- top bar: search box ----
+    top_frame = tk.Frame(root)
+    top_frame.pack(fill="x", padx=10, pady=10)
+
+    tk.Label(top_frame, text="Search:").pack(side="left")
+    search_entry = tk.Entry(top_frame)
+    search_entry.pack(side="left", fill="x", expand=True, padx=5)
+
+    # ---- the table itself ----
+    # ttk.Treeview is tkinter's built-in table widget - columns=(...) names each column,
+    # show="headings" hides an extra blank first column it would otherwise add
+    columns = ("name", "checkin", "checkout", "cost")
+    table = ttk.Treeview(root, columns=columns, show="headings", height=12)
+    table.heading("name", text="Name")
+    table.heading("checkin", text="Check-in")
+    table.heading("checkout", text="Check-out")
+    table.heading("cost", text="Cost")
+    table.column("name", width=140)
+    table.column("checkin", width=100)
+    table.column("checkout", width=100)
+    table.column("cost", width=80)
+    table.pack(padx=10, pady=5, fill="both", expand=True)
+
+    # keeps track of which database booking id belongs to each row shown in the table,
+    # since the table itself only shows the text, not the underlying id
+    row_id_lookup = {}
+
+    # (re)loads whichever bookings should currently be shown into the table
+    def loadRows(bookings_to_show):
+        table.delete(*table.get_children())  # clear every row currently in the table
+        row_id_lookup.clear()
+        for booking in bookings_to_show:
+            booking_id, guest, check_in, check_out, fee = booking
+            check_in_str = dt.date.fromisoformat(check_in).strftime("%d/%m/%y")
+            check_out_str = dt.date.fromisoformat(check_out).strftime("%d/%m/%y")
+            row = table.insert("", tk.END, values=(guest, check_in_str, check_out_str, "£" + str(fee)))
+            row_id_lookup[row] = booking_id
+
+    loadRows(current_property.getBookings())
+
+    # runs every time a key is released in the search box - filters the table live
+    def onSearchChanged(event):
+        search_text = search_entry.get()
+        if search_text == "":
+            loadRows(current_property.getBookings())
+        else:
+            loadRows(current_property.searchByName(search_text))
+
+    search_entry.bind("<KeyRelease>", onSearchChanged)
+
+    # ---- bottom bar: action buttons ----
+    button_frame = tk.Frame(root)
+    button_frame.pack(fill="x", padx=10, pady=10)
+
+    def onAddBookingClicked():
+        openAddBookingWindow(onBookingSaved=lambda: loadRows(current_property.getBookings()))
+
+    def onDeleteBookingClicked():
+        selected = table.selection()  # this gives back whichever row(s) are highlighted
+        if not selected:
+            messagebox.showerror("Error", "Click a booking in the table first")
+            return
+        selected_row = selected[0]
+        booking_id = row_id_lookup[selected_row]
+
+        success, message = current_property.deleteBookingById(booking_id)
+        if not success:
+            messagebox.showerror("Error", message)
+        else:
+            loadRows(current_property.getBookings())
+
+    add_btn = tk.Button(button_frame, text="Add booking", command=onAddBookingClicked)
+    add_btn.pack(side="left", padx=5)
+
+    delete_btn = tk.Button(button_frame, text="Delete booking", command=onDeleteBookingClicked)
+    delete_btn.pack(side="left", padx=5)
+
+    switch_btn = tk.Button(button_frame, text="Switch property", command=showPropertyScreen)
+    switch_btn.pack(side="right", padx=5)
 
 
-# ---------- shared helpers for date input ----------
-# used by both the create booking screen and the search by date screen
+# ============================================================
+# the "Add booking" popup window
+# this is a Toplevel - a second window that sits on top of the main one
+# closing it (the X button, or Cancel) just closes the window, nothing gets saved
+# ============================================================
 
-# builds a day / month / year row of little text boxes and returns the three entry widgets
-def dateEntryRow(label_text):
-    tk.Label(root, text=label_text).pack()
-    frame = tk.Frame(root)
-    frame.pack()
-    day = tk.Entry(frame, width=4)
-    day.grid(row=0, column=0)
-    tk.Label(frame, text="/").grid(row=0, column=1)
-    month = tk.Entry(frame, width=4)
-    month.grid(row=0, column=2)
-    tk.Label(frame, text="/").grid(row=0, column=3)
-    year = tk.Entry(frame, width=6)
-    year.grid(row=0, column=4)
-    return day, month, year
+def openAddBookingWindow(onBookingSaved):
+    # Toplevel() creates a brand new window, separate from root
+    popup = tk.Toplevel(root)
+    popup.title("Add booking")
+    popup.geometry("300x320")
 
+    tk.Label(popup, text="Name").pack(pady=(15, 0))
+    name_entry = tk.Entry(popup)
+    name_entry.pack()
 
-# reads the three boxes and tries to turn them into a real date
-# returns (date, None) if it works, (None, error message) if it doesn't
-def readDate(day_entry, month_entry, year_entry):
-    try:
-        day = int(day_entry.get())
-        month = int(month_entry.get())
-        year = int(year_entry.get())
-        return dt.date(year, month, day), None
-    except ValueError:
-        return None, "that date is invalid"
+    rate_frame = tk.Frame(popup)
+    rate_frame.pack(pady=(10, 0))
+    tk.Label(rate_frame, text="Rate £").pack(side="left")
+    rate_entry = tk.Entry(rate_frame, width=10)
+    rate_entry.pack(side="left")
+    tk.Label(rate_frame, text="per night").pack(side="left")
 
+    tk.Label(popup, text="Check in (DD/MM/YYYY)").pack(pady=(10, 0))
+    check_in_entry = tk.Entry(popup)
+    check_in_entry.pack()
 
-# ---------- create booking screen ----------
+    tk.Label(popup, text="Check out (DD/MM/YYYY)").pack(pady=(10, 0))
+    check_out_entry = tk.Entry(popup)
+    check_out_entry.pack()
 
-def showCreateBookingScreen():
-    clearScreen()
-    tk.Label(root, text="Create Booking - " + current_property.name, font=("Helvetica", 16)).pack(pady=10)
+    button_row = tk.Frame(popup)
+    button_row.pack(pady=20)
 
-    tk.Label(root, text="Guest name:").pack()
-    guest_entry = tk.Entry(root)
-    guest_entry.pack()
+    # Cancel just closes this window - nothing gets saved, the main table is untouched
+    def onCancelClicked():
+        popup.destroy()
 
-    tk.Label(root, text="Nightly rate (£):").pack()
-    rate_entry = tk.Entry(root)
-    rate_entry.pack()
-
-    check_in_day, check_in_month, check_in_year = dateEntryRow("Check-in date:")
-    check_out_day, check_out_month, check_out_year = dateEntryRow("Check-out date:")
-
-    # runs when the "create booking" button is clicked, checks everything before saving
-    def submitBooking():
-        guest = guest_entry.get()
+    def onSaveClicked():
+        guest = name_entry.get()
         if guest == "":
             messagebox.showerror("Error", "Enter a guest name")
             return
@@ -294,143 +332,48 @@ def showCreateBookingScreen():
             messagebox.showerror("Error", "Rate must be a number")
             return
 
-        check_in_date, error = readDate(check_in_day, check_in_month, check_in_year)
-        if error:
-            messagebox.showerror("Error", "Check-in: " + error)
+        try:
+            check_in_date = dt.datetime.strptime(check_in_entry.get(), "%d/%m/%Y").date()
+        except ValueError:
+            messagebox.showerror("Error", "Check-in must be DD/MM/YYYY")
             return
 
-        check_out_date, error = readDate(check_out_day, check_out_month, check_out_year)
-        if error:
-            messagebox.showerror("Error", "Check-out: " + error)
+        try:
+            check_out_date = dt.datetime.strptime(check_out_entry.get(), "%d/%m/%Y").date()
+        except ValueError:
+            messagebox.showerror("Error", "Check-out must be DD/MM/YYYY")
             return
 
         if check_in_date < dt.date.today():
             messagebox.showerror("Error", "Check-in cannot be before today")
             return
+
         if check_out_date <= check_in_date:
             messagebox.showerror("Error", "Check-out must be after check-in")
             return
 
-        total_fee = (check_out_date - check_in_date).days * rate
-        success, message = current_property.saveBooking(guest, check_in_date, check_out_date, total_fee)
+        nights = (check_out_date - check_in_date).days
+        total_fee = nights * rate
 
+        success, message = current_property.saveBooking(guest, check_in_date, check_out_date, total_fee)
         if not success:
             messagebox.showerror("Error", message)
             return
 
         current_property.createInvoice(guest, check_in_date, check_out_date, total_fee)
-        messagebox.showinfo("Success", "Booking created. Invoice saved as invoice.pdf")
-        showMainMenu()
+        popup.destroy()          # close the popup now that saving worked
+        onBookingSaved()         # tell the main table screen to refresh itself
 
-    tk.Button(root, text="Create Booking", command=submitBooking).pack(pady=10)
-    tk.Button(root, text="Back", command=showMainMenu).pack()
+    cancel_btn = tk.Button(button_row, text="Cancel", command=onCancelClicked)
+    cancel_btn.pack(side="left", padx=10)
 
+    save_btn = tk.Button(button_row, text="SAVE", command=onSaveClicked)
+    save_btn.pack(side="left", padx=10)
 
-# ---------- view bookings screen ----------
-# sortby/reverse get passed back into itself when you click a sort button, so the screen
-# just redraws itself with the new order applied
-
-def showViewBookingsScreen(sortby=0, reverse=False):
-    clearScreen()
-    tk.Label(root, text="Bookings - " + current_property.name, font=("Helvetica", 16)).pack(pady=10)
-
-    sort_frame = tk.Frame(root)
-    sort_frame.pack(pady=5)
-    tk.Label(sort_frame, text="Sort by:").pack(side="left")
-    tk.Button(sort_frame, text="Check-in", command=lambda: showViewBookingsScreen(1, False)).pack(side="left")
-    tk.Button(sort_frame, text="Check-out", command=lambda: showViewBookingsScreen(2, False)).pack(side="left")
-    tk.Button(sort_frame, text="Reverse", command=lambda: showViewBookingsScreen(sortby, not reverse)).pack(side="left")
-
-    bookings = current_property.sortBookings(sortby, reverse)
-
-    frame = tk.Frame(root)
-    frame.pack(pady=10, fill="both", expand=True)
-
-    if not bookings:
-        tk.Label(frame, text="No bookings yet").pack()
-
-    for booking in bookings:
-        booking_id = booking[0]
-        row = tk.Frame(frame)
-        row.pack(fill="x", pady=2)
-
-        tk.Label(row, text=formatRow(booking), anchor="w").pack(side="left")
-
-        # same trick as the property buttons - locks in bid to this specific booking's id,
-        # otherwise every delete button would end up deleting the last booking in the loop
-        def makeDeleteHandler(bid=booking_id):
-            def handler():
-                success, message = current_property.deleteBookingById(bid)
-                if not success:
-                    messagebox.showerror("Error", message)
-                else:
-                    showViewBookingsScreen(sortby, reverse)  # refresh with the same sort still applied
-            return handler
-
-        tk.Button(row, text="Delete", command=makeDeleteHandler()).pack(side="right")
-
-    tk.Button(root, text="Back", command=showMainMenu).pack(pady=10)
+    # this makes the popup "modal" - the main window is blocked from being clicked
+    # until this popup is closed, similar to how the sketch shows it sitting on top
+    popup.grab_set()
 
 
-# ---------- search by name screen ----------
-
-def showSearchByNameScreen():
-    clearScreen()
-    tk.Label(root, text="Search by Name", font=("Helvetica", 16)).pack(pady=10)
-
-    search_entry = tk.Entry(root)
-    search_entry.pack(pady=5)
-
-    results_frame = tk.Frame(root)
-    results_frame.pack(pady=10, fill="both", expand=True)
-
-    def runSearch():
-        # clear out any results from the last search before showing new ones
-        for widget in results_frame.winfo_children():
-            widget.destroy()
-
-        matches = current_property.searchByName(search_entry.get())
-
-        if not matches:
-            tk.Label(results_frame, text="No bookings found for that name").pack()
-        for booking in matches:
-            tk.Label(results_frame, text=formatRow(booking), anchor="w").pack(fill="x")
-
-    tk.Button(root, text="Search", command=runSearch).pack()
-    tk.Button(root, text="Back", command=showMainMenu).pack(pady=10)
-
-
-# ---------- search by date screen ----------
-
-def showSearchByDateScreen():
-    clearScreen()
-    tk.Label(root, text="Search by Date", font=("Helvetica", 16)).pack(pady=10)
-
-    day, month, year = dateEntryRow("Date to search for:")
-
-    results_frame = tk.Frame(root)
-    results_frame.pack(pady=10, fill="both", expand=True)
-
-    def runSearch():
-        for widget in results_frame.winfo_children():
-            widget.destroy()
-
-        search_date, error = readDate(day, month, year)
-        if error:
-            tk.Label(results_frame, text=error).pack()
-            return
-
-        matches = current_property.searchByDate(search_date)
-
-        if not matches:
-            tk.Label(results_frame, text="No bookings found for that date").pack()
-        for booking in matches:
-            tk.Label(results_frame, text=formatRow(booking), anchor="w").pack(fill="x")
-
-    tk.Button(root, text="Search", command=runSearch).pack(pady=5)
-    tk.Button(root, text="Back", command=showMainMenu).pack(pady=10)
-
-
-# kick things off with the property picker, then hand control over to tkinter's event loop
 showPropertyScreen()
 root.mainloop()
