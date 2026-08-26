@@ -4,7 +4,19 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
 from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
 from reportlab.pdfgen import canvas
+
+
+# ---- your dad's business details go here once - never asked per booking, just reused every invoice ----
+COMPANY_NAME = "Your Company Name"
+COMPANY_ADDRESS = "123 Example Street, London, UK"
+
+# the colour scheme used throughout the gui - change these to change the whole app's look
+BG_COLOUR = "#f4f1ec"
+ACCENT_COLOUR = "#3f6357"
+ACCENT_TEXT_COLOUR = "#ffffff"
+TABLE_HEADER_COLOUR = "#e4ded2"
 
 
 # a property just needs an id (from the database) and a name
@@ -14,8 +26,8 @@ class Property:
         self.name = name
 
     # tries to save a new booking for this property
-    # returns (True, message) if it worked, (False, message) if it clashed with an existing booking
-    def saveBooking(self, guest, check_in_date, check_out_date, fee):
+    # returns (True, message, booking_id) if it worked, (False, message, None) if it clashed
+    def saveBooking(self, guest, address, check_in_date, check_out_date, rate, fee):
         cursor.execute(
             "SELECT id, guest, check_in, check_out, fee FROM bookings WHERE property_id = ?",
             (self.id,)
@@ -26,19 +38,19 @@ class Property:
             booking_check_in = dt.date.fromisoformat(booking[2])
             booking_check_out = dt.date.fromisoformat(booking[3])
             if booking_check_in <= check_in_date <= booking_check_out:
-                return False, "dates taken (check-in falls inside an existing booking)"
+                return False, "dates taken (check-in falls inside an existing booking)", None
             elif booking_check_in <= check_out_date <= booking_check_out:
-                return False, "dates taken (check-out falls inside an existing booking)"
+                return False, "dates taken (check-out falls inside an existing booking)", None
             elif check_in_date <= booking_check_in and booking_check_out <= check_out_date:
-                return False, "dates taken (an existing booking lies inside your chosen dates)"
+                return False, "dates taken (an existing booking lies inside your chosen dates)", None
 
-        # no clashes, so save it. dates get stored as YYYY-MM-DD strings so they sort properly
         cursor.execute(
-            "INSERT INTO bookings (property_id, guest, check_in, check_out, fee) VALUES (?, ?, ?, ?, ?)",
-            (self.id, guest, check_in_date.isoformat(), check_out_date.isoformat(), fee)
+            """INSERT INTO bookings (property_id, guest, address, check_in, check_out, rate, fee)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (self.id, guest, address, check_in_date.isoformat(), check_out_date.isoformat(), rate, fee)
         )
         conn.commit()
-        return True, "booking saved"
+        return True, "booking saved", cursor.lastrowid  # lastrowid is the id sqlite just gave this new row
 
     # grabs every booking for this property, in the order they were added
     def getBookings(self):
@@ -49,7 +61,6 @@ class Property:
         return cursor.fetchall()
 
     # deletes one booking by its database id
-    # blocks deleting anything that's already happened, so past bookings stay as a record
     def deleteBookingById(self, booking_id):
         cursor.execute("SELECT check_out FROM bookings WHERE id = ?", (booking_id,))
         row = cursor.fetchone()
@@ -62,44 +73,105 @@ class Property:
         conn.commit()
         return True, "booking deleted"
 
-    # case-insensitive "contains" search on guest name, e.g. "ali" matches "Alice"
+    # case-insensitive "contains" search on guest name
     def searchByName(self, search):
         rows = self.getBookings()
         return [b for b in rows if search.lower() in b[1].lower()]
 
-    # spits out a simple pdf invoice for a booking using reportlab
-    def createInvoice(self, guest, check_in_date, check_out_date, fee):
+    # builds a proper itemised pdf invoice using reportlab, with colour and a full breakdown
+    def createInvoice(self, booking_id, guest, address, check_in_date, check_out_date, rate, fee):
         check_in_str = check_in_date.strftime("%d/%m/%Y")
         check_out_str = check_out_date.strftime("%d/%m/%Y")
-        fee_str = str(fee)
+        nights = (check_out_date - check_in_date).days
+
+        subtotal = fee
+        vat = round(subtotal * 0.2, 2)
+        total = round(subtotal + vat, 2)
 
         c = canvas.Canvas("invoice.pdf", pagesize=letter)
         width, height = letter
 
-        c.setFont("Helvetica-Bold", 24)
-        c.drawString(50, height - 80, "Invoice")
+        # ---- header band with the invoice title, in the accent colour ----
+        c.setFillColor(colors.HexColor(ACCENT_COLOUR))
+        c.rect(0, height - 100, width, 100, fill=True, stroke=False)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 26)
+        c.drawString(50, height - 65, "INVOICE")
 
-        c.setLineWidth(1)
-        c.line(50, height - 90, width - 50, height - 90)
+        # ---- company details, top right, inside the header band ----
+        c.setFont("Helvetica", 10)
+        c.drawRightString(width - 50, height - 35, COMPANY_NAME)
+        c.drawRightString(width - 50, height - 50, COMPANY_ADDRESS)
 
-        c.setFont("Helvetica", 12)
+        c.setFillColor(colors.black)
         y = height - 130
-        line_gap = 25
 
+        # ---- invoice metadata: number and date ----
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(50, y, "Invoice #" + str(booking_id))
+        c.drawRightString(width - 50, y, "Date: " + dt.date.today().strftime("%d/%m/%Y"))
+        y -= 30
+
+        # ---- billed to section ----
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(50, y, "Billed to:")
+        y -= 16
+        c.setFont("Helvetica", 11)
+        c.drawString(50, y, guest)
+        y -= 14
+        c.drawString(50, y, address)
+        y -= 14
         c.drawString(50, y, "Property: " + self.name)
-        y -= line_gap
-        c.drawString(50, y, "Guest: " + guest)
-        y -= line_gap
-        c.drawString(50, y, "Check-in: " + check_in_str)
-        y -= line_gap
-        c.drawString(50, y, "Check-out: " + check_out_str)
-        y -= line_gap
+        y -= 14
+        c.drawString(50, y, "Stay: " + check_in_str + " to " + check_out_str)
+        y -= 30
 
+        # ---- the itemised table ----
+        table_top = y
+        row_height = 22
+
+        # header row of the table, shaded
+        c.setFillColor(colors.HexColor(TABLE_HEADER_COLOUR))
+        c.rect(50, table_top - row_height, width - 100, row_height, fill=True, stroke=False)
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(55, table_top - row_height + 6, "Description")
+        c.drawString(330, table_top - row_height + 6, "Nights")
+        c.drawString(410, table_top - row_height + 6, "Unit Price")
+        c.drawRightString(width - 55, table_top - row_height + 6, "Amount")
+
+        y = table_top - row_height
+
+        # the one line item - the stay itself
+        c.setFont("Helvetica", 10)
+        c.drawString(55, y - row_height + 6, "Accommodation (" + self.name + ")")
+        c.drawString(330, y - row_height + 6, str(nights))
+        c.drawString(410, y - row_height + 6, "£" + str(rate))
+        c.drawRightString(width - 55, y - row_height + 6, "£" + str(subtotal))
+        y -= row_height
+
+        c.setLineWidth(0.5)
         c.line(50, y, width - 50, y)
-        y -= line_gap
+        y -= 25
 
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(50, y, "Total Fee: £" + fee_str)
+        # ---- totals box, right aligned ----
+        c.setFont("Helvetica", 11)
+        c.drawString(370, y, "Subtotal:")
+        c.drawRightString(width - 55, y, "£" + str(subtotal))
+        y -= 18
+
+        c.drawString(370, y, "VAT (20%):")
+        c.drawRightString(width - 55, y, "£" + str(vat))
+        y -= 18
+
+        c.setLineWidth(0.5)
+        c.line(370, y + 5, width - 50, y + 5)
+        y -= 15
+
+        c.setFillColor(colors.HexColor(ACCENT_COLOUR))
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(370, y, "Total:")
+        c.drawRightString(width - 55, y, "£" + str(total))
 
         c.save()
 
@@ -119,24 +191,60 @@ cursor.execute("""
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         property_id INTEGER,
         guest TEXT,
+        address TEXT,
         check_in TEXT,
         check_out TEXT,
+        rate REAL,
         fee REAL
     )
 """)
+conn.commit()
+
+# these two columns (address, rate) are new - if you're running this on an existing bookings.db
+# that was made before this version, "CREATE TABLE IF NOT EXISTS" won't add them on its own,
+# since the table already exists. these two lines add them in, and just get ignored (via the
+# try/except) if they're already there from a fresh database
+try:
+    cursor.execute("ALTER TABLE bookings ADD COLUMN address TEXT")
+except sqlite3.OperationalError:
+    pass
+try:
+    cursor.execute("ALTER TABLE bookings ADD COLUMN rate REAL")
+except sqlite3.OperationalError:
+    pass
 conn.commit()
 
 current_property = None
 
 root = tk.Tk()
 root.title("Booking System")
-root.geometry("520x480")
+root.geometry("560x500")
+root.configure(bg=BG_COLOUR)
+
+# this sets up how the table (ttk.Treeview) and its buttons look, since plain tk widgets
+# take colours directly (bg=...) but ttk widgets need a "style" configured like this instead
+style = ttk.Style()
+style.theme_use("default")
+style.configure("Treeview", background="white", fieldbackground="white", rowheight=26, font=("Helvetica", 10))
+style.configure("Treeview.Heading", background=TABLE_HEADER_COLOUR, font=("Helvetica", 10, "bold"))
+style.map("Treeview", background=[("selected", ACCENT_COLOUR)], foreground=[("selected", "white")])
 
 
 def clearScreen():
     widget_list = root.winfo_children()
     for widget in widget_list:
         widget.destroy()
+
+
+# a little helper so every button in the app looks the same, instead of repeating the same
+# colour options on every single tk.Button(...) call
+def makeButton(parent, text, command):
+    return tk.Button(
+        parent, text=text, command=command,
+        bg=ACCENT_COLOUR, fg=ACCENT_TEXT_COLOUR,
+        activebackground=ACCENT_COLOUR, activeforeground=ACCENT_TEXT_COLOUR,
+        font=("Helvetica", 10, "bold"), relief="flat", padx=10, pady=5
+    )
 
 
 # ============================================================
@@ -148,7 +256,7 @@ def showPropertyScreen():
     global current_property
     current_property = None
 
-    title = tk.Label(root, text="Select a property", font=("Helvetica", 16))
+    title = tk.Label(root, text="Select a property", font=("Helvetica", 16, "bold"), bg=BG_COLOUR)
     title.pack(pady=10)
 
     property_listbox = tk.Listbox(root, width=40)
@@ -170,10 +278,9 @@ def showPropertyScreen():
         current_property = Property(chosen_row[0], chosen_row[1])
         showBookingsScreen()
 
-    select_button = tk.Button(root, text="Select Property", command=onSelectClicked)
-    select_button.pack(pady=5)
+    makeButton(root, "Select Property", onSelectClicked).pack(pady=5)
 
-    add_label = tk.Label(root, text="Or add a new property:")
+    add_label = tk.Label(root, text="Or add a new property:", bg=BG_COLOUR)
     add_label.pack(pady=(20, 0))
 
     name_entry = tk.Entry(root)
@@ -188,30 +295,24 @@ def showPropertyScreen():
         conn.commit()
         showPropertyScreen()
 
-    add_button = tk.Button(root, text="Add Property", command=onAddClicked)
-    add_button.pack(pady=5)
+    makeButton(root, "Add Property", onAddClicked).pack(pady=5)
 
 
 # ============================================================
-# SCREEN 2: the main "Bookings" table screen, matching the sketch
-# this stays as the main window - Add Booking opens a SEPARATE popup window on top of it
+# SCREEN 2: the main "Bookings" table screen
 # ============================================================
 
 def showBookingsScreen():
     clearScreen()
     root.title("Bookings - " + current_property.name)
 
-    # ---- top bar: search box ----
-    top_frame = tk.Frame(root)
+    top_frame = tk.Frame(root, bg=BG_COLOUR)
     top_frame.pack(fill="x", padx=10, pady=10)
 
-    tk.Label(top_frame, text="Search:").pack(side="left")
+    tk.Label(top_frame, text="Search:", bg=BG_COLOUR).pack(side="left")
     search_entry = tk.Entry(top_frame)
     search_entry.pack(side="left", fill="x", expand=True, padx=5)
 
-    # ---- the table itself ----
-    # ttk.Treeview is tkinter's built-in table widget - columns=(...) names each column,
-    # show="headings" hides an extra blank first column it would otherwise add
     columns = ("name", "checkin", "checkout", "cost")
     table = ttk.Treeview(root, columns=columns, show="headings", height=12)
     table.heading("name", text="Name")
@@ -224,13 +325,10 @@ def showBookingsScreen():
     table.column("cost", width=80)
     table.pack(padx=10, pady=5, fill="both", expand=True)
 
-    # keeps track of which database booking id belongs to each row shown in the table,
-    # since the table itself only shows the text, not the underlying id
     row_id_lookup = {}
 
-    # (re)loads whichever bookings should currently be shown into the table
     def loadRows(bookings_to_show):
-        table.delete(*table.get_children())  # clear every row currently in the table
+        table.delete(*table.get_children())
         row_id_lookup.clear()
         for booking in bookings_to_show:
             booking_id, guest, check_in, check_out, fee = booking
@@ -241,7 +339,6 @@ def showBookingsScreen():
 
     loadRows(current_property.getBookings())
 
-    # runs every time a key is released in the search box - filters the table live
     def onSearchChanged(event):
         search_text = search_entry.get()
         if search_text == "":
@@ -251,15 +348,14 @@ def showBookingsScreen():
 
     search_entry.bind("<KeyRelease>", onSearchChanged)
 
-    # ---- bottom bar: action buttons ----
-    button_frame = tk.Frame(root)
+    button_frame = tk.Frame(root, bg=BG_COLOUR)
     button_frame.pack(fill="x", padx=10, pady=10)
 
     def onAddBookingClicked():
         openAddBookingWindow(onBookingSaved=lambda: loadRows(current_property.getBookings()))
 
     def onDeleteBookingClicked():
-        selected = table.selection()  # this gives back whichever row(s) are highlighted
+        selected = table.selection()
         if not selected:
             messagebox.showerror("Error", "Click a booking in the table first")
             return
@@ -272,51 +368,69 @@ def showBookingsScreen():
         else:
             loadRows(current_property.getBookings())
 
-    add_btn = tk.Button(button_frame, text="Add booking", command=onAddBookingClicked)
-    add_btn.pack(side="left", padx=5)
-
-    delete_btn = tk.Button(button_frame, text="Delete booking", command=onDeleteBookingClicked)
-    delete_btn.pack(side="left", padx=5)
-
-    switch_btn = tk.Button(button_frame, text="Switch property", command=showPropertyScreen)
-    switch_btn.pack(side="right", padx=5)
+    makeButton(button_frame, "Add booking", onAddBookingClicked).pack(side="left", padx=5)
+    makeButton(button_frame, "Delete booking", onDeleteBookingClicked).pack(side="left", padx=5)
+    makeButton(button_frame, "Switch property", showPropertyScreen).pack(side="right", padx=5)
 
 
 # ============================================================
 # the "Add booking" popup window
-# this is a Toplevel - a second window that sits on top of the main one
-# closing it (the X button, or Cancel) just closes the window, nothing gets saved
 # ============================================================
 
 def openAddBookingWindow(onBookingSaved):
-    # Toplevel() creates a brand new window, separate from root
     popup = tk.Toplevel(root)
     popup.title("Add booking")
-    popup.geometry("300x320")
+    popup.geometry("320x420")
+    popup.configure(bg=BG_COLOUR)
 
-    tk.Label(popup, text="Name").pack(pady=(15, 0))
+    tk.Label(popup, text="Name", bg=BG_COLOUR).pack(pady=(15, 0))
     name_entry = tk.Entry(popup)
     name_entry.pack()
 
-    rate_frame = tk.Frame(popup)
+    tk.Label(popup, text="Address", bg=BG_COLOUR).pack(pady=(10, 0))
+    address_entry = tk.Entry(popup, width=35)
+    address_entry.pack()
+
+    rate_frame = tk.Frame(popup, bg=BG_COLOUR)
     rate_frame.pack(pady=(10, 0))
-    tk.Label(rate_frame, text="Rate £").pack(side="left")
+    tk.Label(rate_frame, text="Rate £", bg=BG_COLOUR).pack(side="left")
     rate_entry = tk.Entry(rate_frame, width=10)
     rate_entry.pack(side="left")
-    tk.Label(rate_frame, text="per night").pack(side="left")
+    tk.Label(rate_frame, text="per night", bg=BG_COLOUR).pack(side="left")
 
-    tk.Label(popup, text="Check in (DD/MM/YYYY)").pack(pady=(10, 0))
-    check_in_entry = tk.Entry(popup)
-    check_in_entry.pack()
+    # builds one row of day / month / year boxes and returns the three entry widgets,
+    # so this can be reused for both check-in and check-out without repeating the layout code
+    def dateEntryRow(label_text):
+        tk.Label(popup, text=label_text, bg=BG_COLOUR).pack(pady=(10, 0))
+        frame = tk.Frame(popup, bg=BG_COLOUR)
+        frame.pack()
+        day = tk.Entry(frame, width=4)
+        day.grid(row=0, column=0)
+        tk.Label(frame, text="/", bg=BG_COLOUR).grid(row=0, column=1)
+        month = tk.Entry(frame, width=4)
+        month.grid(row=0, column=2)
+        tk.Label(frame, text="/", bg=BG_COLOUR).grid(row=0, column=3)
+        year = tk.Entry(frame, width=6)
+        year.grid(row=0, column=4)
+        return day, month, year
 
-    tk.Label(popup, text="Check out (DD/MM/YYYY)").pack(pady=(10, 0))
-    check_out_entry = tk.Entry(popup)
-    check_out_entry.pack()
+    check_in_day, check_in_month, check_in_year = dateEntryRow("Check in (DD/MM/YYYY)")
+    check_out_day, check_out_month, check_out_year = dateEntryRow("Check out (DD/MM/YYYY)")
 
-    button_row = tk.Frame(popup)
+    # reads three day/month/year boxes and tries to build a real date from them
+    # returns (date, None) on success, (None, error message) if the numbers don't form a valid date
+    def readDate(day_entry, month_entry, year_entry):
+        try:
+            day = int(day_entry.get())
+            month = int(month_entry.get())
+            year = int(year_entry.get())
+            return dt.date(year, month, day), None
+        except ValueError:
+            return None, "that date is invalid"
+
+    button_row = tk.Frame(popup, bg=BG_COLOUR)
     button_row.pack(pady=20)
 
-    # Cancel just closes this window - nothing gets saved, the main table is untouched
     def onCancelClicked():
         popup.destroy()
 
@@ -326,22 +440,25 @@ def openAddBookingWindow(onBookingSaved):
             messagebox.showerror("Error", "Enter a guest name")
             return
 
+        address = address_entry.get()
+        if address == "":
+            messagebox.showerror("Error", "Enter an address")
+            return
+
         try:
             rate = int(rate_entry.get())
         except ValueError:
             messagebox.showerror("Error", "Rate must be a number")
             return
 
-        try:
-            check_in_date = dt.datetime.strptime(check_in_entry.get(), "%d/%m/%Y").date()
-        except ValueError:
-            messagebox.showerror("Error", "Check-in must be DD/MM/YYYY")
+        check_in_date, error = readDate(check_in_day, check_in_month, check_in_year)
+        if error is not None:
+            messagebox.showerror("Error", "Check-in: " + error)
             return
 
-        try:
-            check_out_date = dt.datetime.strptime(check_out_entry.get(), "%d/%m/%Y").date()
-        except ValueError:
-            messagebox.showerror("Error", "Check-out must be DD/MM/YYYY")
+        check_out_date, error = readDate(check_out_day, check_out_month, check_out_year)
+        if error is not None:
+            messagebox.showerror("Error", "Check-out: " + error)
             return
 
         if check_in_date < dt.date.today():
@@ -355,23 +472,26 @@ def openAddBookingWindow(onBookingSaved):
         nights = (check_out_date - check_in_date).days
         total_fee = nights * rate
 
-        success, message = current_property.saveBooking(guest, check_in_date, check_out_date, total_fee)
+        success, message, booking_id = current_property.saveBooking(
+            guest, address, check_in_date, check_out_date, rate, total_fee
+        )
         if not success:
             messagebox.showerror("Error", message)
             return
 
-        current_property.createInvoice(guest, check_in_date, check_out_date, total_fee)
-        popup.destroy()          # close the popup now that saving worked
-        onBookingSaved()         # tell the main table screen to refresh itself
+        current_property.createInvoice(
+            booking_id, guest, address, check_in_date, check_out_date, rate, total_fee
+        )
+        popup.destroy()
+        onBookingSaved()
 
-    cancel_btn = tk.Button(button_row, text="Cancel", command=onCancelClicked)
-    cancel_btn.pack(side="left", padx=10)
+    tk.Button(
+        button_row, text="Cancel", command=onCancelClicked,
+        bg="#cccccc", relief="flat", padx=10, pady=5
+    ).pack(side="left", padx=10)
 
-    save_btn = tk.Button(button_row, text="SAVE", command=onSaveClicked)
-    save_btn.pack(side="left", padx=10)
+    makeButton(button_row, "SAVE", onSaveClicked).pack(side="left", padx=10)
 
-    # this makes the popup "modal" - the main window is blocked from being clicked
-    # until this popup is closed, similar to how the sketch shows it sitting on top
     popup.grab_set()
 
 
